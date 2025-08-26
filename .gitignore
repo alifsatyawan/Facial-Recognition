@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.DS_Store
+
+# Virtual env
+.venv/
+
+# Project artifacts and local data
+artifacts/
+data/
+
+
