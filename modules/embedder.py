@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 import os
 import ssl
@@ -51,7 +51,19 @@ class FaceEmbedder:
         emb = self.model(batch).cpu().numpy().astype(np.float32)
         return emb
 
-    def embed_paths(self, paths: List[str], batch_size: int = 32) -> List[np.ndarray]:
+    def embed_paths(self, paths: List[str], batch_size: int = 32, 
+                   detector: Optional['FaceDetector'] = None) -> List[np.ndarray]:
+        """
+        Embed faces from image paths.
+        
+        Args:
+            paths: List of image paths
+            batch_size: Batch size for processing
+            detector: Optional FaceDetector for alignment preprocessing
+            
+        Returns:
+            List of embeddings
+        """
         outputs: List[np.ndarray] = []
         total = len(paths)
         for start in range(0, total, batch_size):
@@ -59,7 +71,21 @@ class FaceEmbedder:
             imgs = []
             for p in paths[start:end]:
                 img = cv2.imread(p)
-                imgs.append(img)
+                if img is None:
+                    imgs.append(None)
+                    continue
+                    
+                # If detector with alignment is provided, use it
+                if detector and hasattr(detector, '_align_faces') and detector._align_faces:
+                    boxes, aligned_faces = detector.detect_and_align_faces(img)
+                    if aligned_faces:
+                        imgs.append(aligned_faces[0])  # Use first aligned face
+                    else:
+                        # Fallback to full image if no faces detected
+                        imgs.append(img)
+                else:
+                    imgs.append(img)
+                    
             emb = self.embed_images(imgs)
             outputs.append(emb)
         if len(outputs) == 0:

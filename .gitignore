@@ -12,5 +12,6 @@ __pycache__/
 # Project artifacts and local data
 artifacts/
 data/
+models/
 
 

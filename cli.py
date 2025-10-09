@@ -22,6 +22,8 @@ from modules.detector import FaceDetector
 from modules.embedder import FaceEmbedder
 from modules.classifier import SVMClassifier
 from modules.dataset import DatasetManager
+from modules.alignment import download_shape_predictor
+import config
 
 
 console = Console()
@@ -46,7 +48,25 @@ def cli():
 def init():
     """Create data and artifacts directories."""
     ensure_dirs()
-    print("[green]Initialized directories:[/green]", DATA_DIR, ARTIFACTS_DIR)
+    config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    print("[green]Initialized directories:[/green]", DATA_DIR, ARTIFACTS_DIR, config.MODELS_DIR)
+
+
+@cli.command("download-model")
+def download_model():
+    """Download dlib shape predictor model for face alignment."""
+    ensure_dirs()
+    config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    if config.SHAPE_PREDICTOR_PATH.exists():
+        print(f"[yellow]Shape predictor already exists at {config.SHAPE_PREDICTOR_PATH}[/yellow]")
+        return
+    
+    success = download_shape_predictor(str(config.SHAPE_PREDICTOR_PATH))
+    if success:
+        print("[green]Shape predictor downloaded successfully![/green]")
+    else:
+        print("[red]Failed to download shape predictor[/red]")
 
 
 @cli.command()
@@ -54,7 +74,9 @@ def init():
 @click.option("--num", default=30, show_default=True, help="Number of samples")
 @click.option("--camera", default=0, show_default=True, help="Camera index")
 @click.option("--auto", is_flag=True, default=False, help="Auto-capture when face detected")
-def capture(name: str, num: int, camera: int, auto: bool):
+@click.option("--align", is_flag=True, default=False, help="Align faces using dlib landmarks")
+@click.option("--shape-predictor", default=None, help="Path to shape predictor model")
+def capture(name: str, num: int, camera: int, auto: bool, align: bool, shape_predictor: Optional[str]):
     """Capture face images for a person from webcam.
 
     Controls:
@@ -64,8 +86,12 @@ def capture(name: str, num: int, camera: int, auto: bool):
     ensure_dirs()
     person_dir = DATA_DIR / name
     person_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Set up shape predictor path
+    if align and not shape_predictor:
+        shape_predictor = str(config.SHAPE_PREDICTOR_PATH)
 
-    detector = FaceDetector()
+    detector = FaceDetector(shape_predictor_path=shape_predictor, align_faces=align)
 
     # Try AVFoundation explicitly on macOS, then fallback
     cap = cv2.VideoCapture(camera, cv2.CAP_AVFOUNDATION)
@@ -95,8 +121,18 @@ def capture(name: str, num: int, camera: int, auto: bool):
             cv2.imshow("Capture", display)
             if auto:
                 if len(boxes) > 0:
-                    x1, y1, x2, y2 = boxes[0]
-                    face = frame[y1:y2, x1:x2]
+                    if align and hasattr(detector, 'detect_and_align_faces'):
+                        # Use aligned faces if available
+                        _, aligned_faces = detector.detect_and_align_faces(frame)
+                        if aligned_faces:
+                            face = aligned_faces[0]
+                        else:
+                            # Fallback to cropped face
+                            x1, y1, x2, y2 = boxes[0]
+                            face = frame[y1:y2, x1:x2]
+                    else:
+                        x1, y1, x2, y2 = boxes[0]
+                        face = frame[y1:y2, x1:x2]
                     out_path = person_dir / f"{int(time.time()*1000)}.jpg"
                     cv2.imwrite(str(out_path), face)
                     captured += 1
@@ -111,8 +147,18 @@ def capture(name: str, num: int, camera: int, auto: bool):
                 if key == ord('q'):
                     break
                 if key == ord('c') and len(boxes) > 0:
-                    x1, y1, x2, y2 = boxes[0]
-                    face = frame[y1:y2, x1:x2]
+                    if align and hasattr(detector, 'detect_and_align_faces'):
+                        # Use aligned faces if available
+                        _, aligned_faces = detector.detect_and_align_faces(frame)
+                        if aligned_faces:
+                            face = aligned_faces[0]
+                        else:
+                            # Fallback to cropped face
+                            x1, y1, x2, y2 = boxes[0]
+                            face = frame[y1:y2, x1:x2]
+                    else:
+                        x1, y1, x2, y2 = boxes[0]
+                        face = frame[y1:y2, x1:x2]
                     out_path = person_dir / f"{int(time.time()*1000)}.jpg"
                     cv2.imwrite(str(out_path), face)
                     captured += 1
@@ -129,7 +175,9 @@ def capture(name: str, num: int, camera: int, auto: bool):
 @click.option("--camera", default=0, show_default=True, help="Camera index")
 @click.option("--threshold", default=0.6, show_default=True, help="Cosine similarity threshold (0-1)")
 @click.option("--max-ref", default=60, show_default=True, help="Max reference images to build centroid")
-def realtime_one(name: str, camera: int, threshold: float, max_ref: int):
+@click.option("--align", is_flag=True, default=False, help="Align faces using dlib landmarks")
+@click.option("--shape-predictor", default=None, help="Path to shape predictor model")
+def realtime_one(name: str, camera: int, threshold: float, max_ref: int, align: bool, shape_predictor: Optional[str]):
     """Realtime single-person recognition via cosine similarity to that person's centroid.
 
     Requires images in data/<name>/*.jpg. No SVM needed.
@@ -144,8 +192,12 @@ def realtime_one(name: str, camera: int, threshold: float, max_ref: int):
     if len(ref_paths) == 0:
         print(f"[red]No images in {person_dir}. Capture first.[/red]")
         return
+    
+    # Set up shape predictor path
+    if align and not shape_predictor:
+        shape_predictor = str(config.SHAPE_PREDICTOR_PATH)
 
-    detector = FaceDetector()
+    detector = FaceDetector(shape_predictor_path=shape_predictor, align_faces=align)
     embedder = FaceEmbedder()
 
     # Build centroid from cropped faces; if detection misses, fallback to full image
@@ -154,11 +206,21 @@ def realtime_one(name: str, camera: int, threshold: float, max_ref: int):
         img = cv2.imread(p)
         if img is None:
             continue
-        boxes = detector.detect_faces(img)
-        if boxes:
-            x1, y1, x2, y2 = boxes[0]
-            img = img[y1:y2, x1:x2]
-        ref_images.append(img)
+        if align and hasattr(detector, 'detect_and_align_faces'):
+            boxes, aligned_faces = detector.detect_and_align_faces(img)
+            if aligned_faces:
+                ref_images.append(aligned_faces[0])
+            elif boxes:
+                x1, y1, x2, y2 = boxes[0]
+                ref_images.append(img[y1:y2, x1:x2])
+            else:
+                ref_images.append(img)
+        else:
+            boxes = detector.detect_faces(img)
+            if boxes:
+                x1, y1, x2, y2 = boxes[0]
+                img = img[y1:y2, x1:x2]
+            ref_images.append(img)
     if len(ref_images) == 0:
         print("[red]Could not prepare reference images.[/red]")
         return
@@ -188,8 +250,15 @@ def realtime_one(name: str, camera: int, threshold: float, max_ref: int):
             if not ok:
                 break
             boxes = detector.detect_faces(frame)
-            for (x1, y1, x2, y2) in boxes:
-                face = frame[y1:y2, x1:x2]
+            aligned_faces = []
+            if align and hasattr(detector, 'detect_and_align_faces'):
+                _, aligned_faces = detector.detect_and_align_faces(frame)
+            
+            for i, (x1, y1, x2, y2) in enumerate(boxes):
+                if aligned_faces and i < len(aligned_faces):
+                    face = aligned_faces[i]
+                else:
+                    face = frame[y1:y2, x1:x2]
                 emb = embedder.embed_images([face])
                 emb = l2norm(emb)
                 sim = float(np.dot(emb[0], centroid))
@@ -209,7 +278,9 @@ def realtime_one(name: str, camera: int, threshold: float, max_ref: int):
 
 @cli.command("build-embeddings")
 @click.option("--batch-size", default=32, show_default=True)
-def build_embeddings(batch_size: int):
+@click.option("--align", is_flag=True, default=False, help="Align faces using dlib landmarks")
+@click.option("--shape-predictor", default=None, help="Path to shape predictor model")
+def build_embeddings(batch_size: int, align: bool, shape_predictor: Optional[str]):
     """Build embeddings for dataset and save to artifacts."""
     ensure_dirs()
     dataset = DatasetManager(DATA_DIR)
@@ -217,8 +288,18 @@ def build_embeddings(batch_size: int):
     if len(image_paths) == 0:
         print("[yellow]No images found in data/. Use capture first.[/yellow]")
         return
+    
+    # Set up shape predictor path
+    if align and not shape_predictor:
+        shape_predictor = str(config.SHAPE_PREDICTOR_PATH)
+    
+    detector = None
+    if align:
+        detector = FaceDetector(shape_predictor_path=shape_predictor, align_faces=True)
+        print("[cyan]Using face alignment for embeddings[/cyan]")
+    
     embedder = FaceEmbedder()
-    embeddings = embedder.embed_paths(image_paths, batch_size=batch_size)
+    embeddings = embedder.embed_paths(image_paths, batch_size=batch_size, detector=detector)
     embeddings = np.asarray(embeddings)
     label_indices = np.array([label_to_index[l] for l in labels], dtype=np.int64)
 
@@ -249,7 +330,9 @@ def train(c: float):
 @cli.command()
 @click.option("--camera", default=0, show_default=True, help="Camera index")
 @click.option("--threshold", default=0.6, show_default=True, help="Probability threshold")
-def realtime(camera: int, threshold: float):
+@click.option("--align", is_flag=True, default=False, help="Align faces using dlib landmarks")
+@click.option("--shape-predictor", default=None, help="Path to shape predictor model")
+def realtime(camera: int, threshold: float, align: bool, shape_predictor: Optional[str]):
     """Run realtime recognition from webcam.
 
     If artifacts are missing, runs detection-only mode (draws boxes, no labels).
@@ -268,8 +351,12 @@ def realtime(camera: int, threshold: float):
         index_to_label = {}
         clf = None
         print("[yellow]Artifacts missing: running detection-only mode.[/yellow]")
+    
+    # Set up shape predictor path
+    if align and not shape_predictor:
+        shape_predictor = str(config.SHAPE_PREDICTOR_PATH)
 
-    detector = FaceDetector()
+    detector = FaceDetector(shape_predictor_path=shape_predictor, align_faces=align)
     embedder = FaceEmbedder() if have_artifacts else None
 
     cap = cv2.VideoCapture(camera, cv2.CAP_AVFOUNDATION)
@@ -287,9 +374,16 @@ def realtime(camera: int, threshold: float):
             if not ok:
                 break
             boxes = detector.detect_faces(frame)
-            for (x1, y1, x2, y2) in boxes:
+            aligned_faces = []
+            if align and hasattr(detector, 'detect_and_align_faces'):
+                _, aligned_faces = detector.detect_and_align_faces(frame)
+            
+            for i, (x1, y1, x2, y2) in enumerate(boxes):
                 if have_artifacts and embedder is not None and clf is not None:
-                    face = frame[y1:y2, x1:x2]
+                    if aligned_faces and i < len(aligned_faces):
+                        face = aligned_faces[i]
+                    else:
+                        face = frame[y1:y2, x1:x2]
                     emb = embedder.embed_images([face])[0]
                     prob, pred = clf.predict_proba([emb])
                     label = index_to_label.get(str(pred[0]), "unknown")
